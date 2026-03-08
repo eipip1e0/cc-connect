@@ -2581,6 +2581,45 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 	return p.Send(e.ctx, replyCtx, message)
 }
 
+// SendImageToSession sends an image to an active session from an external caller (API/CLI).
+// If sessionKey is empty, it picks the first active session.
+func (e *Engine) SendImageToSession(sessionKey string, imageData []byte, mimeType string) error {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+
+	var state *interactiveState
+	if sessionKey != "" {
+		state = e.interactiveStates[sessionKey]
+	} else {
+		// Pick the first active session
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	}
+
+	if state == nil {
+		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	}
+
+	state.mu.Lock()
+	p := state.platform
+	replyCtx := state.replyCtx
+	state.mu.Unlock()
+
+	if p == nil {
+		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	}
+
+	// Check if platform supports sending images
+	imgSender, ok := p.(ImageSender)
+	if !ok {
+		return fmt.Errorf("platform %q does not support sending images", p.Name())
+	}
+
+	return imgSender.SendImage(e.ctx, replyCtx, imageData, mimeType)
+}
+
 // sendPermissionPrompt sends a permission prompt, using inline buttons when the platform supports them.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
 	if bs, ok := p.(InlineButtonSender); ok {

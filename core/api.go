@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -56,6 +57,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		engines:    make(map[string]*Engine),
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/send-image", s.handleSendImage)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -145,6 +147,67 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// SendImageRequest is the JSON body for POST /send-image.
+type SendImageRequest struct {
+	Project    string `json:"project"`
+	SessionKey string `json:"session_key"`
+	ImageData  string `json:"image_data"` // base64 encoded
+	MimeType   string `json:"mime_type"`
+}
+
+func (s *APIServer) handleSendImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SendImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ImageData == "" {
+		http.Error(w, "image_data is required", http.StatusBadRequest)
+		return
+	}
+
+	// Decode base64 image data
+	imageData, err := base64.StdEncoding.DecodeString(req.ImageData)
+	if err != nil {
+		http.Error(w, "invalid base64 image data: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	engine, ok := s.engines[req.Project]
+	s.mu.RUnlock()
+
+	if !ok {
+		// If only one engine, use it by default
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for _, e := range s.engines {
+				engine = e
+				ok = true
+			}
+		}
+		s.mu.RUnlock()
+	}
+
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	if err := engine.SendImageToSession(req.SessionKey, imageData, req.MimeType); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

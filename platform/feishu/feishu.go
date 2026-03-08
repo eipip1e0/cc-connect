@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -869,6 +870,85 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("feishu: patch message code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// SendImage sends an image message to the chat.
+// Implements core.ImageSender interface.
+func (p *Platform) SendImage(ctx context.Context, rctx any, imageData []byte, mimeType string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send image")
+	}
+
+	// Determine image type from MIME type
+	imageType := "message"
+	switch mimeType {
+	case "image/jpeg", "image/jpg":
+		imageType = "message"
+	case "image/png":
+		imageType = "message"
+	case "image/gif":
+		imageType = "message"
+	default:
+		imageType = "message"
+	}
+
+	// Upload image to get image_key
+	imageKey, err := p.uploadImage(ctx, imageData, imageType)
+	if err != nil {
+		return fmt.Errorf("feishu: upload image failed: %w", err)
+	}
+
+	// Send image message
+	content, _ := json.Marshal(map[string]string{"image_key": imageKey})
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeImage).
+			Content(string(content)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send image api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send image failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// uploadImage uploads image data to Feishu and returns the image_key.
+func (p *Platform) uploadImage(ctx context.Context, imageData []byte, imageType string) (string, error) {
+	// Use bytes.Reader to provide io.Reader for the image
+	imageReader := bytes.NewReader(imageData)
+
+	// Build request body
+	body := larkim.NewCreateImageReqBodyBuilder().
+		ImageType(imageType).
+		Image(imageReader).
+		Build()
+
+	// Build request
+	req := larkim.NewCreateImageReqBuilder().
+		Body(body).
+		Build()
+
+	// Call API with file upload option
+	resp, err := p.client.Im.Image.Create(ctx, req, larkcore.WithFileUpload())
+	if err != nil {
+		return "", fmt.Errorf("upload image api: %w", err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("upload image failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || resp.Data.ImageKey == nil {
+		return "", fmt.Errorf("no image_key returned")
+	}
+	return *resp.Data.ImageKey, nil
 }
 
 func (p *Platform) Stop() error {

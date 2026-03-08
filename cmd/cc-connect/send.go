@@ -67,6 +67,14 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
+	// If not provided via flags, try environment variables
+	if project == "" {
+		project = os.Getenv("CC_PROJECT")
+	}
+	if sessionKey == "" {
+		sessionKey = os.Getenv("CC_SESSION_KEY")
+	}
+
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
