@@ -997,7 +997,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !quiet && event.Content != "" {
 				sp.freeze()
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
+				// Use collapsible message if platform supports it
+				if _, ok := p.(CollapsibleSender); ok {
+					e.sendCollapsible(p, replyCtx, "💭 Thinking", preview, true)
+				} else {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
+				}
 			}
 
 		case EventToolUse:
@@ -1005,15 +1010,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !quiet {
 				sp.freeze()
 				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
-				// Use code block if content is long (>5 lines or >200 chars), otherwise inline code
-				lineCount := strings.Count(inputPreview, "\n") + 1
-				var formattedInput string
-				if lineCount > 5 || utf8.RuneCountInString(inputPreview) > 200 {
-					formattedInput = fmt.Sprintf("```\n%s\n```", inputPreview)
+				// Use collapsible message if platform supports it
+				if _, ok := p.(CollapsibleSender); ok {
+					toolContent := fmt.Sprintf("**Tool:** `%s`\n\n**Input:**\n```\n%s\n```", event.ToolName, inputPreview)
+					e.sendCollapsible(p, replyCtx, fmt.Sprintf("⚙️ Execution #%d", toolCount), toolContent, true)
 				} else {
-					formattedInput = fmt.Sprintf("`%s`", inputPreview)
+					// Use code block if content is long (>5 lines or >200 chars), otherwise inline code
+					lineCount := strings.Count(inputPreview, "\n") + 1
+					var formattedInput string
+					if lineCount > 5 || utf8.RuneCountInString(inputPreview) > 200 {
+						formattedInput = fmt.Sprintf("```\n%s\n```", inputPreview)
+					} else {
+						formattedInput = fmt.Sprintf("`%s`", inputPreview)
+					}
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput))
 				}
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput))
 			}
 
 		case EventText:
@@ -2645,6 +2656,26 @@ func (e *Engine) send(p Platform, replyCtx any, content string) {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
+	}
+	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
+		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
+	}
+}
+
+// sendCollapsible sends a collapsible message if the platform supports it.
+// Falls back to regular send if not supported.
+func (e *Engine) sendCollapsible(p Platform, replyCtx any, title string, content string, collapsed bool) {
+	start := time.Now()
+	if cs, ok := p.(CollapsibleSender); ok {
+		if err := cs.SendCollapsible(e.ctx, replyCtx, title, content, collapsed); err != nil {
+			slog.Error("platform collapsible send failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		}
+	} else {
+		// Fallback to regular send with title prefix
+		combined := fmt.Sprintf("%s\n%s", title, content)
+		if err := p.Send(e.ctx, replyCtx, combined); err != nil {
+			slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		}
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))

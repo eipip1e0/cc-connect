@@ -117,6 +117,13 @@ type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, imageData []byte, mimeType string) error
 }
 
+// CollapsibleSender is an optional interface for platforms that support
+// sending collapsible/expandable messages (e.g., for thinking process).
+// The content is shown in a collapsed section by default, user can click to expand.
+type CollapsibleSender interface {
+	SendCollapsible(ctx context.Context, replyCtx any, title string, content string, collapsed bool) error
+}
+
 // MessageHandler is called by platforms when a new message arrives.
 type MessageHandler func(p Platform, msg *Message)
 

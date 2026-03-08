@@ -784,23 +784,91 @@ type feishuPreviewHandle struct {
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
+// Note: Feishu has a limit on table count per card, so we process tables carefully.
 func buildCardJSON(content string) string {
+	// Feishu card has limit on table count (max 1 table per markdown element)
+	// Split content by table and create separate elements if needed
+	elements := buildMarkdownElements(content)
+
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
 		"body": map[string]any{
-			"elements": []map[string]any{
-				{
-					"tag":     "markdown",
-					"content": content,
-				},
-			},
+			"elements": elements,
 		},
 	}
 	b, _ := json.Marshal(card)
 	return string(b)
+}
+
+// buildMarkdownElements splits content into multiple markdown elements if needed
+// to avoid hitting Feishu's table count limit per element.
+func buildMarkdownElements(content string) []map[string]any {
+	// Check if content has tables
+	lines := strings.Split(content, "\n")
+	var elements []map[string]any
+	var currentChunk []string
+	inTable := false
+	tableCount := 0
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+
+		if isTableLine {
+			if !inTable {
+				// Start of new table
+				if tableCount >= 1 && len(currentChunk) > 0 {
+					// Flush current chunk before starting new table
+					elements = append(elements, map[string]any{
+						"tag":     "markdown",
+						"content": strings.Join(currentChunk, "\n"),
+					})
+					currentChunk = nil
+					tableCount = 0
+				}
+				inTable = true
+				tableCount++
+			}
+		} else if inTable && trimmed != "" && !strings.HasPrefix(trimmed, "|") {
+			// End of table
+			inTable = false
+		}
+
+		currentChunk = append(currentChunk, line)
+
+		// If we've accumulated too many lines or this is the last line, flush
+		if len(currentChunk) >= 100 || i == len(lines)-1 {
+			if len(currentChunk) > 0 {
+				elements = append(elements, map[string]any{
+					"tag":     "markdown",
+					"content": strings.Join(currentChunk, "\n"),
+				})
+				currentChunk = nil
+				tableCount = 0
+			}
+		}
+	}
+
+	// Flush remaining content
+	if len(currentChunk) > 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": strings.Join(currentChunk, "\n"),
+		})
+	}
+
+	// If no elements created (shouldn't happen), return single element
+	if len(elements) == 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		})
+	}
+
+	return elements
 }
 
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
@@ -949,6 +1017,78 @@ func (p *Platform) uploadImage(ctx context.Context, imageData []byte, imageType 
 		return "", fmt.Errorf("no image_key returned")
 	}
 	return *resp.Data.ImageKey, nil
+}
+
+// SendCollapsible sends a collapsible message using Feishu interactive card.
+// Implements core.CollapsibleSender interface.
+// Reference: message-bridge-opencode-plugin collapsiblePanel function
+func (p *Platform) SendCollapsible(ctx context.Context, rctx any, title string, content string, collapsed bool) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send collapsible message")
+	}
+
+	// Build collapsible_panel card per Feishu official spec
+	// Reference: https://open.feishu.cn/document/feishu-cards/card-json-v2-components/containers/collapsible-panel
+	card := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":             "collapsible_panel",
+					"expanded":        !collapsed,
+					"background_color": "grey",
+					"header": map[string]any{
+						"title": map[string]any{
+							"tag":     "plain_text",
+							"content": title,
+						},
+					},
+					"elements": []map[string]any{
+						{
+							"tag": "div",
+							"text": map[string]any{
+								"tag":     "lark_md",
+								"content": content,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	cardJSON, _ := json.Marshal(card)
+
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(string(cardJSON)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send collapsible api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send collapsible failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// SendThinking sends a thinking process panel (collapsible).
+func (p *Platform) SendThinking(ctx context.Context, rctx any, thinking string) error {
+	return p.SendCollapsible(ctx, rctx, "💭 Thinking", thinking, true)
+}
+
+// SendExecution sends an execution/tool step panel (collapsible).
+// idx is the execution number (1-based).
+func (p *Platform) SendExecution(ctx context.Context, rctx any, idx int, content string) error {
+	title := fmt.Sprintf("⚙️ Execution #%d", idx)
+	return p.SendCollapsible(ctx, rctx, title, content, true)
 }
 
 func (p *Platform) Stop() error {
